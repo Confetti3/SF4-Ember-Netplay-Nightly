@@ -1,0 +1,387 @@
+name: Test build tools
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Source branch, tag, commit, or refs/pull/33/head (only run trusted source on this personal PC)'
+        type: string
+        default: nightly
+        required: true
+      full_build:
+        description: Build, package, and test locally on the runner
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ember-build-tools
+  cancel-in-progress: false
+
+jobs:
+  probe:
+    runs-on: [self-hosted, Windows, X64, ember]
+    timeout-minutes: 15
+    outputs:
+      revision: ${{ steps.target.outputs.revision }}
+    steps:
+      - name: Probe runner tools
+        id: tools
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $false
+          Write-Host "PowerShell: $($PSVersionTable.PSVersion)"
+          Write-Host "Culture: $((Get-Culture).Name)"
+          Write-Host "OS: $([Environment]::OSVersion.VersionString)"
+          $drive = [IO.DriveInfo]::new([IO.Path]::GetPathRoot($env:GITHUB_WORKSPACE))
+          $freeGiB = ($drive.AvailableFreeSpace / 1GB).ToString('F1', [Globalization.CultureInfo]::InvariantCulture)
+          Write-Host "Work drive free disk: $freeGiB GiB"
+
+          $rows = [Collections.Generic.List[string]]::new()
+          function Report([string]$Name, [bool]$Found, [string]$Version = '', [string]$Use = 'Full build') {
+            $status = if ($Found) { 'found' } else { 'missing' }
+            # Do not print paths, environment values, or directory inventories.
+            $versionText = [Net.WebUtility]::HtmlEncode($Version).Replace('|', '&#124;').Replace("`r", '').Replace("`n", ' ')
+            Write-Host "$Name`: $status $versionText"
+            $rows.Add("| $Name | $status | $versionText | $Use |")
+          }
+          function Version([string]$Exe, [string[]]$Arguments = @('--version')) {
+            if (!$Exe -or !(Test-Path -LiteralPath $Exe -PathType Leaf)) { return '' }
+            try {
+              $result = @(& $Exe @Arguments 2>$null)
+              if ($LASTEXITCODE -eq 0) { return [string]($result | Select-Object -First 1) }
+            } catch { }
+            return 'version unavailable'
+          }
+          $git = Get-Command git -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+          Report 'git' ([bool]$git) $(if ($git) { Version $git.Source }) 'Required for checkout/provenance tests'
+
+          $vs = $env:SF4E_VISUAL_STUDIO_PATH
+          $vswhere = if (${env:ProgramFiles(x86)}) { Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio/Installer/vswhere.exe' }
+          if (!$vs -and $vswhere -and (Test-Path -LiteralPath $vswhere -PathType Leaf)) {
+            $vs = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          }
+          $vcFound = $false
+          $vcVersion = ''
+          if ($vs) {
+            $versionFile = Join-Path $vs 'VC/Auxiliary/Build/Microsoft.VCToolsVersion.default.txt'
+            if (Test-Path -LiteralPath $versionFile -PathType Leaf) {
+              $vcVersion = (Get-Content -LiteralPath $versionFile -Raw).Trim()
+              $vcFound = (Test-Path -LiteralPath (Join-Path $vs 'VC/Auxiliary/Build/vcvarsall.bat') -PathType Leaf) -and
+                (Test-Path -LiteralPath (Join-Path $vs "VC/Tools/MSVC/$vcVersion/bin/Hostx64/x86/cl.exe") -PathType Leaf) -and
+                (Test-Path -LiteralPath (Join-Path $vs "VC/Tools/MSVC/$vcVersion/bin/Hostx64/x64/cl.exe") -PathType Leaf)
+            }
+          }
+          Report 'Visual Studio VC x86/x64 tools' $vcFound $vcVersion
+          foreach ($tool in @('cmake', 'ninja', 'ctest')) {
+            $relative = if ($tool -eq 'ninja') { 'Common7/IDE/CommonExtensions/Microsoft/CMake/Ninja/ninja.exe' }
+              else { "Common7/IDE/CommonExtensions/Microsoft/CMake/CMake/bin/$tool.exe" }
+            $exe = if ($vs) { Join-Path $vs $relative }
+            $found = [bool]($exe -and (Test-Path -LiteralPath $exe -PathType Leaf))
+            Report "VS $tool" $found $(if ($found) { Version $exe })
+          }
+          $msbuild = if ($vs) { Join-Path $vs 'MSBuild/Current/Bin/MSBuild.exe' }
+          $msbuildFound = [bool]($msbuild -and (Test-Path -LiteralPath $msbuild -PathType Leaf))
+          Report 'VS MSBuild (current source requires VS 2026)' $msbuildFound $(if ($msbuildFound) { [Diagnostics.FileVersionInfo]::GetVersionInfo($msbuild).ProductVersion })
+          $vcpkg = if ($env:VCPKG_ROOT) { Join-Path $env:VCPKG_ROOT 'vcpkg.exe' }
+          $vcpkgFound = [bool]($vcpkg -and (Test-Path -LiteralPath $vcpkg -PathType Leaf))
+          Report 'vcpkg (VCPKG_ROOT)' $vcpkgFound $(if ($vcpkgFound) { Version $vcpkg @('version') })
+          $sdkFound = [bool]($env:SF4E_DISCORD_SDK_ARCHIVE -and (Test-Path -LiteralPath $env:SF4E_DISCORD_SDK_ARCHIVE -PathType Leaf))
+          Report 'Discord SDK archive (SF4E_DISCORD_SDK_ARCHIVE)' $sdkFound
+          foreach ($tool in @('rustc', 'cargo', 'python')) {
+            $command = Get-Command $tool -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+            Report $tool ([bool]$command) $(if ($command) { Version $command.Source })
+          }
+          $cargoHome = if ($env:CARGO_HOME) { $env:CARGO_HOME } else { Join-Path ([Environment]::GetFolderPath('UserProfile')) '.cargo' }
+          Report 'Cargo at CARGO_HOME/bin (package notice collector)' (Test-Path -LiteralPath (Join-Path $cargoHome 'bin/cargo.exe') -PathType Leaf)
+          $wsl = Get-Command wsl.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+          Report 'WSL launcher' ([bool]$wsl) $(if ($wsl) { [Diagnostics.FileVersionInfo]::GetVersionInfo($wsl.Source).ProductVersion }) 'Optional; no distro launched'
+          # Prefer Git Bash: the optional test accepts Windows file paths, unlike a WSL launcher.
+          $bashCandidates = @()
+          if ($git) {
+            $gitRoot = Split-Path (Split-Path $git.Source -Parent) -Parent
+            if ((Split-Path $gitRoot -Leaf) -eq 'mingw64') { $gitRoot = Split-Path $gitRoot -Parent }
+            $bashCandidates += (Join-Path $gitRoot 'bin/bash.exe'), (Join-Path $gitRoot 'usr/bin/bash.exe')
+          }
+          $bashCommand = Get-Command bash.exe -CommandType Application -ErrorAction SilentlyContinue |
+            Where-Object { $_.Source -notmatch '[\\/](System32|Sysnative)[\\/]bash\.exe$' } | Select-Object -First 1
+          if ($bashCommand) { $bashCandidates += $bashCommand.Source }
+          $bash = $bashCandidates | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } | Select-Object -First 1
+          Report 'Local Bash' ([bool]$bash) $(if ($bash) { Version $bash }) 'Optional Nightly paths/staging fixtures'
+          if ($bash) { "bash=$bash" | Add-Content -LiteralPath $env:GITHUB_OUTPUT -Encoding utf8 }
+
+          @('## Runner tools', '', "Work drive free disk: $freeGiB GiB", '',
+            '| Tool | Status | Version | Needed for |', '| --- | --- | --- | --- |') + $rows.ToArray() |
+            Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Encoding utf8
+          'Missing full-build or optional tools do not fail the probe. PowerShell 7 and git are required; script tests must pass.' |
+            Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Encoding utf8
+          # Optional version probes may fail; do not leak their exit status to the Actions wrapper.
+          $global:LASTEXITCODE = 0
+
+      - name: Validate source ref
+        id: validate
+        shell: pwsh
+        env:
+          SOURCE_REF: ${{ inputs.ref }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $false
+          if ($PSVersionTable.PSVersion.Major -lt 7) { throw 'PowerShell 7 (pwsh) is required.' }
+          if (!(Get-Command git -CommandType Application -ErrorAction SilentlyContinue)) { throw 'Missing git: install Git for Windows and make git available to the runner service.' }
+          # Restrict characters before passing the value as one native argument or a step output.
+          if ($env:SOURCE_REF -cnotmatch '^[A-Za-z0-9][A-Za-z0-9._/-]{0,254}$') {
+            throw 'Invalid source ref: use a branch, tag, full commit SHA, or refs/pull/<number>/head.'
+          }
+          & git check-ref-format --allow-onelevel $env:SOURCE_REF
+          if ($LASTEXITCODE -ne 0) { throw 'Invalid source ref: git check-ref-format rejected it.' }
+          "ref=$($env:SOURCE_REF)" | Add-Content -LiteralPath $env:GITHUB_OUTPUT -Encoding utf8
+
+      - name: Checkout public source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          repository: Confetti3/SF4-Ember-Netplay
+          ref: ${{ steps.validate.outputs.ref }}
+          path: source/nightly
+          persist-credentials: false
+          submodules: recursive
+
+      - name: Designate the Nightly checkout
+        id: target
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $repo = Join-Path $env:GITHUB_WORKSPACE 'source/nightly'
+          $own = Get-Content -LiteralPath (Join-Path $repo 'build-target.json') -Raw | ConvertFrom-Json -AsHashtable
+          $base = if ($own.channels -and $own.channels.nightly) { $own.channels.nightly } else { $own }
+          $nightly = $base.Clone()
+          $nightly.sourceDirectory = 'nightly'
+          $nightly.Remove('channels')
+          # Parent target takes precedence. Preserve the source's build/stage paths and features;
+          # the top-level stable entry names the parent, never this checkout.
+          [ordered]@{sourceDirectory='.';buildDirectory=$base.buildDirectory;installDirectory=$base.installDirectory;
+            features=$base.features;channels=@{nightly=$nightly}} | ConvertTo-Json -Depth 20 |
+            Set-Content -LiteralPath (Join-Path (Split-Path $repo -Parent) 'build-target.json') -Encoding utf8
+          . (Join-Path $repo 'scripts/BuildEnvironment.ps1')
+          if ((Get-EmberBuildTarget $repo).channel -ne 'nightly') { throw 'Nightly designation failed.' }
+          $revision = & git -C $repo rev-parse HEAD
+          if ($LASTEXITCODE -ne 0 -or $revision -cnotmatch '^[0-9a-f]{40}$') { throw 'Could not resolve the checked-out source commit.' }
+          "revision=$revision" | Add-Content -LiteralPath $env:GITHUB_OUTPUT -Encoding utf8
+          @('', "Source commit: $revision", '',
+            'Created source/build-target.json from the source target, designating source/nightly as channel nightly. The checked-in target is unchanged.') |
+            Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Encoding utf8
+
+      - name: Test Nightly paths
+        if: ${{ !cancelled() && steps.target.outcome == 'success' }}
+        shell: pwsh
+        env:
+          BASH_PATH: ${{ steps.tools.outputs.bash }}
+        run: |
+          & ./source/nightly/scripts/test-nightly-paths.ps1 -BashPath $env:BASH_PATH
+
+      - name: Test Nightly publication fixtures
+        if: ${{ !cancelled() && steps.target.outcome == 'success' }}
+        shell: pwsh
+        run: |
+          & ./source/nightly/scripts/test-nightly-publication.ps1
+          # The fixture deliberately leaves LASTEXITCODE=1 from its mocked gh failure.
+          # A thrown assertion still fails the step before this reset.
+          $global:LASTEXITCODE = 0
+
+      - name: Test build provenance
+        if: ${{ !cancelled() && steps.target.outcome == 'success' }}
+        shell: pwsh
+        run: |
+          & ./source/nightly/scripts/test-build-provenance.ps1
+
+      - name: Test upgrade recovery fixtures
+        if: ${{ !cancelled() && steps.target.outcome == 'success' }}
+        shell: pwsh
+        run: |
+          & ./source/nightly/scripts/test-upgrade-recovery.ps1
+
+      - name: Test frame capture validation fixtures
+        if: ${{ !cancelled() && steps.target.outcome == 'success' }}
+        shell: pwsh
+        run: |
+          # The fixture writes decimal numbers into comma-delimited CSV with the current culture.
+          [Globalization.CultureInfo]::CurrentCulture = [Globalization.CultureInfo]::InvariantCulture
+          & ./source/nightly/scripts/test-capture-frame-pacing.ps1
+
+  full_build:
+    needs: probe
+    if: ${{ inputs.full_build }}
+    runs-on: [self-hosted, Windows, X64, ember]
+    timeout-minutes: 360
+    steps:
+      - name: Checkout the probed source commit
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          repository: Confetti3/SF4-Ember-Netplay
+          ref: ${{ needs.probe.outputs.revision }}
+          path: source/nightly
+          persist-credentials: false
+          submodules: recursive
+
+      - name: Designate the Nightly checkout
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $repo = Join-Path $env:GITHUB_WORKSPACE 'source/nightly'
+          $own = Get-Content -LiteralPath (Join-Path $repo 'build-target.json') -Raw | ConvertFrom-Json -AsHashtable
+          $base = if ($own.channels -and $own.channels.nightly) { $own.channels.nightly } else { $own }
+          $nightly = $base.Clone()
+          $nightly.sourceDirectory = 'nightly'
+          $nightly.Remove('channels')
+          [ordered]@{sourceDirectory='.';buildDirectory=$base.buildDirectory;installDirectory=$base.installDirectory;
+            features=$base.features;channels=@{nightly=$nightly}} | ConvertTo-Json -Depth 20 |
+            Set-Content -LiteralPath (Join-Path (Split-Path $repo -Parent) 'build-target.json') -Encoding utf8
+          . (Join-Path $repo 'scripts/BuildEnvironment.ps1')
+          if ((Get-EmberBuildTarget $repo).channel -ne 'nightly') { throw 'Nightly designation failed.' }
+
+      - name: Check full build prerequisites
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $false
+          $repo = Join-Path $env:GITHUB_WORKSPACE 'source/nightly'
+          $missing = [Collections.Generic.List[string]]::new()
+          foreach ($tool in @('git', 'cargo', 'rustc', 'python')) {
+            $command = Get-Command $tool -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+            if (!$command) { $missing.Add("$tool on the runner service PATH") }
+            else {
+              & $command.Source --version *> $null
+              if ($LASTEXITCODE -ne 0) { $missing.Add("a working $tool executable on PATH") }
+            }
+          }
+          if (!$env:VCPKG_ROOT -or !(Test-Path -LiteralPath (Join-Path $env:VCPKG_ROOT 'vcpkg.exe') -PathType Leaf)) {
+            $missing.Add('VCPKG_ROOT pointing to bootstrapped vcpkg')
+          }
+          elseif (!(Test-Path -LiteralPath (Join-Path $env:VCPKG_ROOT 'scripts/buildsystems/vcpkg.cmake') -PathType Leaf)) {
+            $missing.Add('vcpkg CMake toolchain under VCPKG_ROOT')
+          }
+          if (!$env:SF4E_DISCORD_SDK_ARCHIVE -or !(Test-Path -LiteralPath $env:SF4E_DISCORD_SDK_ARCHIVE -PathType Leaf)) {
+            $missing.Add('SF4E_DISCORD_SDK_ARCHIVE pointing to the official pinned archive')
+          }
+          $cargoHome = if ($env:CARGO_HOME) { $env:CARGO_HOME } else { Join-Path ([Environment]::GetFolderPath('UserProfile')) '.cargo' }
+          if (!(Test-Path -LiteralPath (Join-Path $cargoHome 'bin/cargo.exe') -PathType Leaf)) { $missing.Add('Cargo at CARGO_HOME/bin/cargo.exe (or the default user .cargo/bin/cargo.exe) for package notices') }
+          $toolchainFile = Join-Path $repo 'rust/sf4-net/rust-toolchain.toml'
+          $toolchainText = Get-Content -LiteralPath $toolchainFile -Raw
+          if ($toolchainText -match '(?m)^channel\s*=\s*"([^"]+)"\s*$') {
+            $channel = $Matches[1]
+            $rustup = Get-Command rustup -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($rustup) {
+              $installed = @(& $rustup.Source toolchain list 2>$null)
+              if ($LASTEXITCODE -ne 0 -or !($installed -match ('^' + [regex]::Escape($channel) + '-x86_64-pc-windows-msvc(?:\s|$)'))) {
+                $missing.Add("Rust toolchain $channel-x86_64-pc-windows-msvc (pinned by rust-toolchain.toml)")
+              }
+            }
+            elseif (Get-Command rustc -CommandType Application -ErrorAction SilentlyContinue) {
+              $rustVersion = & rustc --version 2>$null
+              if ($LASTEXITCODE -ne 0 -or $rustVersion -notmatch ('^rustc ' + [regex]::Escape($channel) + '\s')) { $missing.Add("pinned Rust $channel or rustup with that toolchain installed") }
+            }
+          }
+          $vs = $env:SF4E_VISUAL_STUDIO_PATH
+          $vswhere = if (${env:ProgramFiles(x86)}) { Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio/Installer/vswhere.exe' }
+          if (!$vs -and $vswhere -and (Test-Path -LiteralPath $vswhere -PathType Leaf)) {
+            $vs = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          }
+          if (!$vs) { $missing.Add('Visual Studio C++ x86/x64 tools via SF4E_VISUAL_STUDIO_PATH or vswhere') }
+          else {
+            $versionFile = Join-Path $vs 'VC/Auxiliary/Build/Microsoft.VCToolsVersion.default.txt'
+            if (!(Test-Path -LiteralPath $versionFile -PathType Leaf)) { $missing.Add('Visual Studio VC tools default version file') }
+            else {
+              $vcVersion = (Get-Content -LiteralPath $versionFile -Raw).Trim()
+              foreach ($arch in @('x86', 'x64')) {
+                if (!(Test-Path -LiteralPath (Join-Path $vs "VC/Tools/MSVC/$vcVersion/bin/Hostx64/$arch/cl.exe") -PathType Leaf)) { $missing.Add("Visual Studio VC $arch compiler") }
+              }
+            }
+            foreach ($relative in @('VC/Auxiliary/Build/vcvarsall.bat',
+              'Common7/IDE/CommonExtensions/Microsoft/CMake/CMake/bin/cmake.exe',
+              'Common7/IDE/CommonExtensions/Microsoft/CMake/CMake/bin/ctest.exe',
+              'Common7/IDE/CommonExtensions/Microsoft/CMake/Ninja/ninja.exe', 'MSBuild/Current/Bin/MSBuild.exe')) {
+              if (!(Test-Path -LiteralPath (Join-Path $vs $relative) -PathType Leaf)) { $missing.Add("Visual Studio $relative") }
+            }
+            $msbuild = Join-Path $vs 'MSBuild/Current/Bin/MSBuild.exe'
+            if ((Test-Path -LiteralPath $msbuild -PathType Leaf) -and
+              [Diagnostics.FileVersionInfo]::GetVersionInfo($msbuild).FileMajorPart -lt 18) {
+              $missing.Add('Visual Studio 2026 (the source uses the Visual Studio 18 2026 generator)')
+            }
+          }
+          if ($missing.Count) {
+            @('## Full build prerequisites', '', '| Missing requirement |', '| --- |') + @($missing | ForEach-Object { "| $_ |" }) |
+              Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Encoding utf8
+            throw "Missing full build prerequisites: $($missing -join '; '). Configure the runner service account, then restart the service to pick up environment changes."
+          }
+          $pin = Get-Content -LiteralPath (Join-Path $repo 'cmake/discord-sdk-pin.json') -Raw | ConvertFrom-Json
+          if ((Get-FileHash -LiteralPath $env:SF4E_DISCORD_SDK_ARCHIVE -Algorithm SHA256).Hash -ine $pin.sha256) {
+            throw 'SF4E_DISCORD_SDK_ARCHIVE does not match cmake/discord-sdk-pin.json; supply the pinned official archive.'
+          }
+          . (Join-Path $repo 'scripts/BuildEnvironment.ps1')
+          $tools = Get-EmberToolPaths $repo $vs $env:VCPKG_ROOT
+          "SF4E_VISUAL_STUDIO_PATH=$($tools.VisualStudioPath)" | Add-Content -LiteralPath $env:GITHUB_ENV -Encoding utf8
+          (Join-Path $tools.VisualStudioPath 'Common7/IDE/CommonExtensions/Microsoft/CMake/CMake/bin') |
+            Add-Content -LiteralPath $env:GITHUB_PATH -Encoding utf8
+
+      - name: Build and run regression tests
+        shell: pwsh
+        run: |
+          & ./source/nightly/scripts/build-current.ps1
+
+      - name: Package locally
+        id: package
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # Outputs are outside the checkout so a later checkout does not clean previous packages.
+          $out = Join-Path $env:GITHUB_WORKSPACE "local-packages/$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+          $label = "build-tools-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+          . ./source/nightly/scripts/package-team.ps1 -OutDir $out -VersionLabel $label
+          "folder=$script:PackageFolderPath" | Add-Content -LiteralPath $env:GITHUB_OUTPUT -Encoding utf8
+          @('## Local package', '', "Package folder: ``$script:PackageFolderPath``", "Package ZIP: ``$script:PackageZipPath``", '',
+            'Package tests are pending. These files remain on this PC; this workflow does not publish or upload them.') |
+            Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Encoding utf8
+
+      - name: Test the local package
+        shell: pwsh
+        env:
+          PACKAGE_DIR: ${{ steps.package.outputs.folder }}
+        run: |
+          . ./source/nightly/scripts/BuildEnvironment.ps1
+          Enter-EmberVcEnvironment $env:SF4E_VISUAL_STUDIO_PATH
+          # CTest's powershell.exe fixtures use the OS user culture. The current source's
+          # frame capture fixture fails under nl-BE; report that failure without changing source.
+          & ./source/nightly/scripts/run-package-tests.ps1 -PackageDir $env:PACKAGE_DIR
+
+      - name: Report verified build provenance
+        shell: pwsh
+        env:
+          PACKAGE_DIR: ${{ steps.package.outputs.folder }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $repo = Join-Path $env:GITHUB_WORKSPACE 'source/nightly'
+          . (Join-Path $repo 'scripts/BuildEnvironment.ps1')
+          . (Join-Path $repo 'scripts/BuildProvenance.ps1')
+          $target = Get-EmberBuildTarget $repo
+          $build = Join-Path $repo $target.buildDirectory
+          $stage = Join-Path $repo $target.installDirectory
+          $receipt = Assert-BuildReceipt $repo $build $stage
+          $receiptPath = Join-Path $build 'build-provenance.json'
+          $receiptHash = (Get-FileHash -LiteralPath $receiptPath -Algorithm SHA256).Hash
+          $excluded = [Net.WebUtility]::HtmlEncode([string]$receipt.testsExcluded).Replace('|', '&#124;')
+          if ((Get-FileHash -LiteralPath (Join-Path $env:PACKAGE_DIR 'build-provenance.json') -Algorithm SHA256).Hash -ne $receiptHash) { throw 'Packaged provenance differs from the verified build receipt.' }
+          @('', '## Verified build receipt', '', '| Field | Value |', '| --- | --- |',
+            "| Source commit | $($receipt.baseRevision) |", "| Source fingerprint | $($receipt.sourceFingerprint) |",
+            "| Receipt SHA-256 | $receiptHash |", "| Built UTC | $($receipt.builtUtc) |",
+            "| Build tests passed | $($receipt.testsPassed) |", "| Build exclusions | $excluded |",
+            "| Package tests passed | true |", "| Binary count | $(@($receipt.binaries).Count) |",
+            "| Rust lock SHA-256 | $($receipt.dependencies.rustLockSha256) |", '', '| Binary | SHA-256 |', '| --- | --- |') |
+            Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Encoding utf8
+          foreach ($binary in $receipt.binaries) {
+            $name = [Net.WebUtility]::HtmlEncode([string]$binary.path).Replace('|', '&#124;')
+            "| $name | $($binary.sha256) |" | Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Encoding utf8
+          }
+          'Automated build/package checks do not establish gameplay or live-service acceptance.' |
+            Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Encoding utf8
