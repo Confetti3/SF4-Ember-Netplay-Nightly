@@ -12,6 +12,11 @@ on:
         description: Build, package, and test locally on the runner
         type: boolean
         default: false
+      release_label:
+        description: 'Nightly label to publish as a draft pre-release, e.g. 1.3.0-nightly20261016 (needs full_build). Empty keeps the package on the runner.'
+        type: string
+        default: ''
+        required: false
 
 permissions:
   contents: read
@@ -333,13 +338,26 @@ jobs:
       - name: Package locally
         id: package
         shell: pwsh
+        env:
+          RELEASE_LABEL: ${{ inputs.release_label }}
         run: |
           $ErrorActionPreference = 'Stop'
           # Outputs are outside the checkout so a later checkout does not clean previous packages.
           $out = Join-Path $env:GITHUB_WORKSPACE "local-packages/$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
           $label = "build-tools-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+          if ($env:RELEASE_LABEL) {
+            # The same label rules as publish-nightly.ps1, on this source's CMake version.
+            if ($env:RELEASE_LABEL -cnotmatch '^([0-9]{1,9}\.[0-9]{1,9}\.[0-9]{1,9})-nightly[0-9]{8}(\.[0-9]+)?$') { throw 'Invalid release_label: expected <version>-nightlyYYYYMMDD[.N].' }
+            $version = $Matches[1]
+            $lines = @(Get-Content -LiteralPath ./source/nightly/CMakeLists.txt | Where-Object { $_ -match '^\s+VERSION ' })
+            if ($lines.Count -ne 1 -or $lines[0].Trim() -cne "VERSION $version") { throw "release_label version $version is not this source's CMake VERSION." }
+            $label = $env:RELEASE_LABEL
+          }
           . ./source/nightly/scripts/package-team.ps1 -OutDir $out -VersionLabel $label
           "folder=$script:PackageFolderPath" | Add-Content -LiteralPath $env:GITHUB_OUTPUT -Encoding utf8
+          "zip=$script:PackageZipPath" | Add-Content -LiteralPath $env:GITHUB_OUTPUT -Encoding utf8
+          "out=$out" | Add-Content -LiteralPath $env:GITHUB_OUTPUT -Encoding utf8
+          "label=$label" | Add-Content -LiteralPath $env:GITHUB_OUTPUT -Encoding utf8
           @('## Local package', '', "Package folder: ``$script:PackageFolderPath``", "Package ZIP: ``$script:PackageZipPath``", '',
             'Package tests are pending. These files remain on this PC; this workflow does not publish or upload them.') |
             Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Encoding utf8
@@ -385,3 +403,73 @@ jobs:
           }
           'Automated build/package checks do not establish gameplay or live-service acceptance.' |
             Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Encoding utf8
+
+      - name: Build the installer and release files
+        if: ${{ inputs.release_label != '' }}
+        shell: pwsh
+        env:
+          PACKAGE_DIR: ${{ steps.package.outputs.folder }}
+          PACKAGE_ZIP: ${{ steps.package.outputs.zip }}
+          OUT_DIR: ${{ steps.package.outputs.out }}
+          LABEL: ${{ steps.package.outputs.label }}
+          REVISION: ${{ needs.probe.outputs.revision }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          . ./source/nightly/scripts/package-installer.ps1 -PackageDir $env:PACKAGE_DIR -VersionLabel $env:LABEL -OutDir $env:OUT_DIR -VisualStudioPath $env:SF4E_VISUAL_STUDIO_PATH
+          $release = Join-Path $env:GITHUB_WORKSPACE "release-files/$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+          New-Item -ItemType Directory -Path $release -Force | Out-Null
+          # The .sha256 files exactly as package-team.ps1 and package-installer.ps1 wrote them, as publish-nightly.ps1 ships them.
+          foreach ($file in @($env:PACKAGE_ZIP, "$env:PACKAGE_ZIP.sha256", $script:InstallerPath, "$script:InstallerPath.sha256")) {
+            Copy-Item -LiteralPath $file -Destination $release
+          }
+          $buildId = (Get-FileHash -LiteralPath (Join-Path $env:PACKAGE_DIR 'Sidecar.dll') -Algorithm SHA256).Hash.ToLowerInvariant()
+          $notes = @("SF4 Ember Netplay Nightly $env:LABEL", '', "Source: $env:REVISION", '',
+            'Nightly build from the nightly branch. Daily test builds may break; rooms only with other Nightly players.', '',
+            "Public rooms build: $buildId")
+          [IO.File]::WriteAllText((Join-Path $release 'notes.md'), ($notes -join "`n") + "`n")
+          "RELEASE_FILES=$release" | Add-Content -LiteralPath $env:GITHUB_ENV -Encoding utf8
+          @('', '## Release files', '', "Label: $env:LABEL", "Public rooms build: $buildId") | Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Encoding utf8
+
+      - name: Hand the release files to the publish job
+        if: ${{ inputs.release_label != '' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: nightly-release
+          path: ${{ env.RELEASE_FILES }}
+          if-no-files-found: error
+          retention-days: 3
+          compression-level: 0
+
+  publish:
+    needs: [probe, full_build]
+    if: ${{ inputs.full_build && inputs.release_label != '' }}
+    # GitHub-hosted, so the self-hosted runner never holds a token that can write.
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: write
+    steps:
+      - name: Receive the release files
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: nightly-release
+          path: release
+
+      - name: Create the draft pre-release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          LABEL: ${{ inputs.release_label }}
+        run: |
+          set -euo pipefail
+          cd release
+          # The Windows scripts write "<HASH>  <name>" with CRLF; compare without depending on that layout.
+          for sum in *.sha256; do
+            read -r expected name < <(tr -d '\r' < "$sum")
+            [ "$name" = "${sum%.sha256}" ] || { echo "$sum names $name" >&2; exit 1; }
+            actual=$(sha256sum "$name" | cut -d' ' -f1)
+            [ "${expected,,}" = "$actual" ] || { echo "$name does not match $sum" >&2; exit 1; }
+          done
+          tag="v$LABEL"
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then echo "Release $tag already exists." >&2; exit 1; fi
+          gh release create "$tag" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --draft --prerelease --title "SF4 Ember Netplay Nightly $LABEL" --notes-file notes.md sf4-ember-netplay-*.zip sf4-ember-netplay-*.zip.sha256 sf4-ember-netplay-*-setup.exe sf4-ember-netplay-*-setup.exe.sha256
+          echo "Draft created: $tag (publish it after checking the notes)" >> "$GITHUB_STEP_SUMMARY"
