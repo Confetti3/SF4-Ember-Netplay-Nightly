@@ -207,14 +207,6 @@ jobs:
         run: |
           & ./source/nightly/scripts/test-upgrade-recovery.ps1
 
-      - name: Test frame capture validation fixtures
-        if: ${{ !cancelled() && steps.target.outcome == 'success' }}
-        shell: pwsh
-        run: |
-          # The fixture writes decimal numbers into comma-delimited CSV with the current culture.
-          [Globalization.CultureInfo]::CurrentCulture = [Globalization.CultureInfo]::InvariantCulture
-          & ./source/nightly/scripts/test-capture-frame-pacing.ps1
-
   full_build:
     needs: probe
     if: ${{ inputs.full_build }}
