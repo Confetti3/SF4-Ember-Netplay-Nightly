@@ -71,12 +71,12 @@ static void TestFirstComeFirstPaired() {
 	for (const auto& t : authority.SnapshotView().tables) CHECK(t.phase == TablePhase::Waiting && t.queue.empty());
 }
 
-// Two players, so nobody waits alone: after a set the pair stays, Ready waits
+// Two pairs, so nobody waits alone: after a set the pair stays, Ready waits
 // for both Rematches, then the pair plays again.
 static void TestRematchBoth() {
 	auto authority = Arcade();
-	const MemberId a = Join(authority, 0, true), b = Join(authority, 1);
-	Sit(authority, a, 0); Sit(authority, b, 9);
+	const MemberId a = Join(authority, 0, true), b = Join(authority, 1), c = Join(authority, 2), d = Join(authority, 3);
+	Sit(authority, a, 0); Sit(authority, b, 9); Sit(authority, c, 2); Sit(authority, d, 10);
 	Beat(authority, a);
 	const auto table = TableOf(authority, a);
 	CHECK(authority.SnapshotView().tables[table].deciding && Paired(authority, a, b));
@@ -96,7 +96,8 @@ static void TestRematchBoth() {
 static void TestRematchOneRepairs() {
 	auto authority = Arcade();
 	const MemberId a = Join(authority, 0, true), b = Join(authority, 1), c = Join(authority, 2), d = Join(authority, 3), e = Join(authority, 4);
-	Sit(authority, a, 0); Sit(authority, b, 5);
+	const MemberId f = Join(authority, 5), g = Join(authority, 6);
+	Sit(authority, a, 0); Sit(authority, b, 5); Sit(authority, f, 2); Sit(authority, g, 10);
 	Beat(authority, a);
 	CHECK(Choose(authority, a, ActionKind::Rematch).accepted);
 	Sit(authority, c, 7);
@@ -135,6 +136,19 @@ static void TestArcadeWinnerPlaysWaiter() {
 	for (const auto& t : room.tables) CHECK(!t.deciding);
 	Sit(authority, d, 4);
 	CHECK(Paired(authority, d, b) && Paired(authority, a, c));
+}
+
+// Two players alone in the room: there is no new opponent to offer, so the
+// pair is not asked and just readies again.
+static void TestArcadeTwoPlayers() {
+	auto authority = Arcade();
+	const MemberId a = Join(authority, 0, true), b = Join(authority, 1);
+	Sit(authority, a, 0); Sit(authority, b, 9);
+	Beat(authority, a);
+	const auto& t = authority.SnapshotView().tables[TableOf(authority, a)];
+	CHECK(Paired(authority, a, b) && !t.deciding && t.phase == TablePhase::Waiting);
+	CHECK(Choose(authority, a, ActionKind::Rematch).reason == RejectReason::WrongPhase);
+	CHECK(Choose(authority, a, ActionKind::Ready).accepted && Choose(authority, b, ActionKind::Ready).accepted);
 }
 
 // Two pairs and nobody alone: the pair that finishes stays and chooses, and
@@ -287,6 +301,7 @@ int main() {
 		TestRematchBoth();
 		TestRematchOneRepairs();
 		TestArcadeWinnerPlaysWaiter();
+		TestArcadeTwoPlayers();
 		TestArcadePairsChoose();
 		TestArcadeFiveRotate();
 		TestKingStreaksAndCrown();

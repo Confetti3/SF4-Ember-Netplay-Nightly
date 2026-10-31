@@ -61,8 +61,9 @@ void RoomAuthority::PairArcade(MemberId member, MemberId parted) {
 // A set is over. The winner stays and plays whoever has waited longest alone,
 // here; the loser waits for the next one (PairArcade), not the winner. With
 // nobody waiting alone the pair stays: an Arcade pair chooses Rematch or New
-// opponent. King of the hill moves the streaks and the top slot, and while
-// anyone else sits at a cabinet the winner waits here for them instead.
+// opponent, and with nobody else there just readies again. King of the hill
+// moves the streaks and the top slot, and while anyone else sits at a
+// cabinet the winner waits here for them instead.
 void RoomAuthority::ArcadeSetEnded(Table& table, MemberId winner, MemberId loser) {
 	const bool king = snapshot_.arcade == KingRoom;
 	if (king) {
@@ -73,10 +74,11 @@ void RoomAuthority::ArcadeSetEnded(Table& table, MemberId winner, MemberId loser
 		TouchRoom();
 	}
 	Table* const challenger = Waiter(winner, loser, &table);
-	const bool parts = challenger || (king && std::any_of(snapshot_.cabinets.begin(), snapshot_.cabinets.end(),
-		[&](MemberId m) { return m && m != winner && m != loser; }));
+	const bool others = std::any_of(snapshot_.cabinets.begin(), snapshot_.cabinets.end(),
+		[&](MemberId m) { return m && m != winner && m != loser; });
+	const bool parts = challenger || (king && others);
 	if (!parts) {
-		table.deciding = !king; table.rematch[0] = table.rematch[1] = false;
+		table.deciding = !king && others; table.rematch[0] = table.rematch[1] = false;
 		return;
 	}
 	if (table.p1 == loser) table.p1 = 0; else table.p2 = 0;
