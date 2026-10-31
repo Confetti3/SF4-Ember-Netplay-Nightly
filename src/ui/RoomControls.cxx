@@ -34,8 +34,6 @@ std::string ReadyBlocker(const ShellView& v, const room::Table& t) {
     if (t.phase == TablePhase::Ready) return loc::T("room.both_ready");
     if (t.phase == TablePhase::Playing && !finishedGame) return loc::T("room.match_in_progress.detail");
     if (!t.p1 || !t.p2) return loc::T("room.waiting_other_seat");
-    // An Arcade pair readies again once both chose Rematch.
-    if (t.deciding) return loc::T("room.rematch_detail");
     if (!v.controllerReady) return loc::T("room.controller_required");
     return v.selectionError;
 }
@@ -193,6 +191,16 @@ ReadyControl DescribeReady(const ShellView& v, const room::Table& t, int seat) {
     const bool finishedGame = t.phase == TablePhase::Playing && postMatch;
     control.label = loc::T(t.phase == TablePhase::Paused ? "room.phase.unresolved" : t.phase == TablePhase::Ready ? "room.preparing_match" :
         t.phase == TablePhase::Playing && !finishedGame ? "room.match_in_progress" : postMatch ? "room.ready_rematch" : "room.ready_up");
+    // An Arcade pair readies again once both chose Rematch. Until then Ready
+    // is the table's Rematch (ToggleReady), which needs no controller or pick.
+    if (t.deciding && seat >= 0 && seat < 2) {
+        control.label = loc::T("room.rematch");
+        control.detail = loc::T("room.rematch_detail");
+        if (!RoomActionsAvailable(v)) control.refusal = RoomWaitReason(v);
+        else if (t.rematch[seat]) control.refusal = control.detail;
+        else control.kind = ReadyControl::Rematch;
+        return control;
+    }
     control.detail = control.refusal = ReadyBlocker(v, t);
     if (control.detail.empty()) {
         control.kind = postMatch ? ReadyControl::Rematch : ReadyControl::Ready;

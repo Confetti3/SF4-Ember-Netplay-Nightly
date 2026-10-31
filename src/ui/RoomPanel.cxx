@@ -669,6 +669,9 @@ void ApplicationShell::ToggleReady(const ShellView& v,const Submit& submit) {
   room::Action request;request.table=static_cast<std::uint8_t>(selectedTable_);
   request.kind=room::ActionKind::Unready;request.seat=local->seat;
   if(!SendRoom(std::move(request),v,submit)&&error_.empty())error_=loc::T("room.action_rejected");
+ }else if(control.kind==ReadyControl::Rematch&&v.room.tables[selectedTable_].deciding){
+  room::Action request;request.table=static_cast<std::uint8_t>(selectedTable_);request.kind=room::ActionKind::Rematch;
+  if(!SendRoom(std::move(request),v,submit)&&error_.empty())error_=loc::T("room.action_rejected");
  }else if(control.kind!=ReadyControl::None)
   Send(control.kind==ReadyControl::Rematch?netplay::CommandKind::Rematch:netplay::CommandKind::Ready,v,submit);
  else if(!control.refusal.empty())

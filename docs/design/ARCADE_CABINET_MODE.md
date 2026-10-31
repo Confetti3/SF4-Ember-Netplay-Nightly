@@ -28,9 +28,11 @@ or King of the hill. Any type can be private or public.
    whoever has waited alone longest; the loser waits for the next one who
    sits down, not the winner. With three players the winner plays the third
    and the loser waits. Only when nobody waits alone does the pair stay:
-   each chooses Rematch or New opponent. Both Rematch: they play again. New
-   opponent from either: each plays whoever waited longest (not each other),
-   or waits for the next one who sits. One who sits down while a pair
+   with others at the cabinets each chooses Rematch or New opponent (the
+   board's Ready is the Rematch); alone in the room they just ready again.
+   Both Rematch: they play again. New opponent from either: each plays
+   whoever waited longest (not each other), or waits for the next one who
+   sits. One who sits down while a pair
    chooses waits alone until a set ends or the pair parts.
 5. King of the hill rotates the same way, with streaks: every pair plays at
    once. When nobody waits alone the winner still waits for the next one free

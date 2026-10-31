@@ -658,7 +658,11 @@ void ArcadeJourneys() {
   room::Member local;local.id=1;local.name="Local";local.table=0;local.seat=0;a.view.room.members.push_back(local);
   room::Member peer;peer.id=2;peer.name="Peer";peer.table=0;peer.seat=1;a.view.room.members.push_back(peer);
   auto& t=a.view.room.tables[0];t.p1=1;t.p2=2;t.revision=7;t.matchGeneration=5;t.phase=room::TablePhase::Playing;
-  a.view.room.cabinets[0]=1;a.view.room.cabinets[8]=2;
+  // A second pair at cabinets 2 and 10: with others seated a finished pair decides.
+  room::Member third;third.id=3;third.name="Third";third.table=1;third.seat=0;a.view.room.members.push_back(third);
+  room::Member fourth;fourth.id=4;fourth.name="Fourth";fourth.table=1;fourth.seat=1;a.view.room.members.push_back(fourth);
+  a.view.room.tables[1].p1=3;a.view.room.tables[1].p2=4;
+  a.view.room.cabinets[0]=1;a.view.room.cabinets[8]=2;a.view.room.cabinets[1]=3;a.view.room.cabinets[9]=4;
   a.Screen("room");
   std::vector<MenuEntry> rows;SetMenuEntriesProbe([&](const std::vector<MenuEntry>& r){rows=r;});
   const auto row=[&](const char* id){return std::find_if(rows.begin(),rows.end(),[&](const MenuEntry& e){return e.id==id;});};
@@ -677,6 +681,10 @@ void ArcadeJourneys() {
   Check(row("back")->detail==loc::T("postmatch.back.keep_seat"),"Back after an Arcade set said it gives up the cabinet");
   const auto quiet=a.actions.size();a.Wait(11);gameOver();
   Check(!leftCabinet(quiet),"No answer after an Arcade set left the cabinet");
+  // With the prompt missed, the room's Ready is the pair's Rematch.
+  const auto readied=a.actions.size();a.Screen("room");a.Choose("ready");
+  Check(a.actions.size()==readied+1&&a.actions.back().roomAction.kind==room::ActionKind::Rematch,
+   "Ready after a missed Arcade prompt was not the table's Rematch");
   setOver(6);
   const auto chose=a.actions.size();a.Choose("rematch");
   Check(a.actions.size()==chose+1&&a.actions.back().command.kind==Kind::RoomAction&&a.actions.back().roomAction.kind==room::ActionKind::Rematch&&
