@@ -3,10 +3,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     Error, Result,
-    rooms::{is_country, is_player_name},
-    skill::SKILL_BANDS,
     cards::is_card_token,
     levels::{FIGHTERS, MAX_TIER},
+    rooms::{is_country, is_player_name},
+    skill::SKILL_BANDS,
 };
 
 /// The most lines of a board one answer lists.
@@ -55,16 +55,27 @@ impl PointsBoard {
             if !is_player_name(&line.name) {
                 return Err(Error::InvalidField("name"));
             }
-            if line.country.as_deref().is_some_and(|country| !is_country(country)) {
+            if line
+                .country
+                .as_deref()
+                .is_some_and(|country| !is_country(country))
+            {
                 return Err(Error::InvalidField("country"));
             }
-            if line.band.is_some_and(|band| !(1..=SKILL_BANDS).contains(&band)) {
+            if line
+                .band
+                .is_some_and(|band| !(1..=SKILL_BANDS).contains(&band))
+            {
                 return Err(Error::InvalidField("band"));
             }
             if line.tier > MAX_TIER {
                 return Err(Error::InvalidField("tier"));
             }
-            if line.card.as_deref().is_some_and(|card| !is_card_token(card)) {
+            if line
+                .card
+                .as_deref()
+                .is_some_and(|card| !is_card_token(card))
+            {
                 return Err(Error::InvalidField("card"));
             }
             if line.place < 1 || line.place < last {

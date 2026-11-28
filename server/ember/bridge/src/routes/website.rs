@@ -46,11 +46,7 @@ use crate::{
     },
     sealed::Sealed,
     secrets::Keys,
-    skill::{
-        boards::Places,
-        explain,
-        levels,
-    },
+    skill::{boards::Places, explain, levels},
     util::random,
 };
 

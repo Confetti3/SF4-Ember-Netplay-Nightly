@@ -8,10 +8,7 @@
 //! of another player.
 use serde::{Deserialize, Serialize};
 
-use crate::{
-    Error, Result,
-    skill::SKILL_BANDS,
-};
+use crate::{Error, Result, skill::SKILL_BANDS};
 
 /// `GET /v1/ranking/rating`: the caller's own rating details.
 pub const RATING_PATH: &str = "/v1/ranking/rating";
@@ -114,7 +111,7 @@ pub struct RatingDetails {
 /// Every number of a rating and its examples is a real one: no NaN, no infinity.
 fn rating_is_finite(rating: &OwnRating) -> bool {
     let scalars = [rating.rating, rating.deviation, rating.volatility];
-    let edge = |value: Option<f64>| value.map_or(true, |edge| edge.is_finite());
+    let edge = |value: Option<f64>| value.is_none_or(|edge| edge.is_finite());
     scalars.iter().all(|value| value.is_finite())
         && edge(rating.up_at)
         && edge(rating.down_below)
@@ -162,10 +159,7 @@ impl RatingDetails {
             }
             for example in &rating.examples {
                 let weights = [example.win.weight, example.loss.weight];
-                if !weights
-                    .iter()
-                    .all(|weight| 0.0 < *weight && *weight <= 1.0)
-                {
+                if !weights.iter().all(|weight| 0.0 < *weight && *weight <= 1.0) {
                     return Err(Error::InvalidField("weight"));
                 }
             }
@@ -183,7 +177,9 @@ mod tests {
             start_rating: 1500.0,
             start_deviation: 350.0,
             start_volatility: 0.06,
-            floors: [1050.0, 1200.0, 1350.0, 1500.0, 1650.0, 1800.0, 1950.0, 2100.0, 2250.0],
+            floors: [
+                1050.0, 1200.0, 1350.0, 1500.0, 1650.0, 1800.0, 1950.0, 2100.0, 2250.0,
+            ],
             margin: 25.0,
             settled_deviation: 100.0,
             unsure_deviation: 200.0,
@@ -210,20 +206,18 @@ mod tests {
             down_below: Some(1675.0),
             faint_in_days: Some(302),
             played_at: 1_700_000_000,
-            examples: [
-                Example {
-                    opponent: 1742.0,
-                    band: 7,
-                    win: Outcome {
-                        weight: 1.0,
-                        change: 36.5,
-                    },
-                    loss: Outcome {
-                        weight: 1.0,
-                        change: -36.5,
-                    },
+            examples: [Example {
+                opponent: 1742.0,
+                band: 7,
+                win: Outcome {
+                    weight: 1.0,
+                    change: 36.5,
                 },
-            ]
+                loss: Outcome {
+                    weight: 1.0,
+                    change: -36.5,
+                },
+            }]
             .into_iter()
             .collect(),
         }
