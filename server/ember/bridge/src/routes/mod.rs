@@ -1,6 +1,7 @@
 pub mod account;
 pub mod archive;
 pub mod blumint;
+pub mod boards;
 pub mod desk_pages;
 pub mod discovery;
 pub mod events;
@@ -28,6 +29,7 @@ pub mod sign_in;
 pub mod sign_ups;
 pub mod tournaments;
 pub mod webhooks;
+pub mod website;
 
 use std::time::{Duration, Instant};
 
@@ -138,7 +140,9 @@ pub fn router(state: AppState) -> Router {
             get(ranking::standing).put(ranking::choose),
         )
         .route(ember_protocol::skill::BOARD_PATH, get(ranking::board))
+        .route(ember_protocol::skill::RATING_PATH, get(ranking::rating))
         .route("/v1/ranking/board/public", get(ranking::public_board))
+        .route(ember_protocol::levels::POINTS_BOARD_PATH, get(boards::public_board))
         .route(ember_protocol::levels::POINTS_PATH, get(levels::own))
         .route(ember_protocol::levels::LOOKUP_PATH, post(levels::lookup))
         .route(ember_protocol::levels::CARDS_ME_PATH, put(profiles::save))
@@ -224,6 +228,7 @@ pub fn router(state: AppState) -> Router {
             post(webhooks::rotate),
         );
     app = sign_in::routes(app);
+    app = website::routes(app);
     if state.config.mock_browser {
         app = app
             .route(
